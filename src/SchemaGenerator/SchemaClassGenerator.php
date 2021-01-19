@@ -9,7 +9,9 @@ use GraphQL\SchemaGenerator\CodeGenerator\EnumObjectBuilder;
 use GraphQL\SchemaGenerator\CodeGenerator\InputObjectClassBuilder;
 use GraphQL\SchemaGenerator\CodeGenerator\ObjectBuilderInterface;
 use GraphQL\SchemaGenerator\CodeGenerator\QueryObjectClassBuilder;
+use GraphQL\SchemaGenerator\CodeGenerator\MutationObjectClassBuilder;
 use GraphQL\SchemaObject\QueryObject;
+use GraphQL\SchemaObject\MutationObject;
 use GraphQL\Util\StringLiteralFormatter;
 use RuntimeException;
 
@@ -30,12 +32,17 @@ class SchemaClassGenerator
     /**
      * @var string
      */
-	private $writeDir;
+    private $writeDir;
 
     /**
      * @var string
      */
-	private $generationNamespace;
+    private $modelKind;
+
+    /**
+     * @var string
+     */
+    private $generationNamespace;
 
     /**
      * This array is used as a set to store the already generated objects
@@ -43,7 +50,7 @@ class SchemaClassGenerator
      *AND complete covering the schema scanner class
      * @var array
      */
-	private $generatedObjects;
+    private $generatedObjects;
 
     /**
      * SchemaClassGenerator constructor.
@@ -52,21 +59,22 @@ class SchemaClassGenerator
      * @param string $writeDir
      * @param string $namespace
      */
-	public function __construct(Client $client, string $writeDir = '', string $namespace = ObjectBuilderInterface::DEFAULT_NAMESPACE)
+    public function __construct(Client $client, string $writeDir = '', string $modelKind, string $namespace = ObjectBuilderInterface::DEFAULT_NAMESPACE)
     {
         $this->schemaInspector     = new SchemaInspector($client);
         $this->generatedObjects    = [];
         $this->writeDir            = $writeDir;
         $this->generationNamespace = $namespace;
+        $this->modelKind = $modelKind;
         $this->setWriteDir();
     }
 
     /**
      * @return bool
      */
-	public function generateRootQueryObject(): bool
-	{
-	    $objectArray    = $this->schemaInspector->getQueryTypeSchema();
+    public function generateRootQueryObject(): bool
+    {
+        $objectArray    = $this->schemaInspector->getQueryTypeSchema();
         $rootObjectName = QueryObject::ROOT_QUERY_OBJECT_NAME;
         $queryTypeName  = $objectArray['name'];
         //$rootObjectDescr = $objectArray['description'];
@@ -85,13 +93,32 @@ class SchemaClassGenerator
     }
 
     /**
+     * @return bool
+     */
+    public function generateRootMutationObject(): bool
+    {
+        $objectArray    = $this->schemaInspector->getMutationTypeSchema();
+        $rootObjectName = MutationObject::ROOT_MUTATION_OBJECT_NAME;
+        $mutationTypeName  = $objectArray['name'];
+        //$rootObjectDescr = $objectArray['description'];
+
+        $mutationObjectBuilder = new MutationObjectClassBuilder($this->writeDir, $rootObjectName, $this->generationNamespace);
+        $this->generatedObjects[$mutationTypeName] = true;
+        $this->appendMutationObjectFields($mutationObjectBuilder, $rootObjectName, $objectArray['fields']);
+
+        $mutationObjectBuilder->build();
+
+        return true;
+    }
+
+    /**
      * This method receives the array of object fields as an input and adds the fields to the query object building
      *
      * @param QueryObjectClassBuilder $queryObjectBuilder
      * @param string                  $currentTypeName
      * @param array                   $fieldsArray
      */
-	private function appendQueryObjectFields(QueryObjectClassBuilder $queryObjectBuilder, string $currentTypeName, array $fieldsArray)
+    private function appendQueryObjectFields(QueryObjectClassBuilder $queryObjectBuilder, string $currentTypeName, array $fieldsArray)
     {
         foreach ($fieldsArray as $fieldArray) {
             $name = $fieldArray['name'];
@@ -109,7 +136,7 @@ class SchemaClassGenerator
             } else {
 
                 // Generate nested type object if it wasn't generated
-                $objectGenerated = $this->generateObject($typeName, $typeKind);
+                $objectGenerated = $this->generateObject($typeName, $typeKind, $this->modelKind);
                 if ($objectGenerated) {
 
                     // Generate nested type arguments object if it wasn't generated
@@ -126,6 +153,45 @@ class SchemaClassGenerator
     }
 
     /**
+     * This method receives the array of object fields as an input and adds the fields to the query object building
+     *
+     * @param MutationObjectClassBuilder $mutationObjectBuilder
+     * @param string                     $currentTypeName
+     * @param array                      $fieldsArray
+     */
+    private function appendMutationObjectFields(MutationObjectClassBuilder $mutationObjectBuilder, string $currentTypeName, array $fieldsArray)
+    {
+        foreach ($fieldsArray as $fieldArray) {
+            $name = $fieldArray['name'];
+            // Skip fields with name "mutation"
+            if ($name === 'mutation') continue;
+            //$description = $fieldArray['description'];
+            [$typeName, $typeKind] = $this->getTypeInfo($fieldArray);
+            if ($typeKind === FieldTypeKindEnum::SCALAR) {
+                $mutationObjectBuilder->addScalarField($name, $fieldArray['isDeprecated'], $fieldArray['deprecationReason']);
+            } elseif ($typeKind === FieldTypeKindEnum::ENUM_OBJECT) {
+                $this->generateEnumObject($typeName);
+                $mutationObjectBuilder->addScalarField($name, $fieldArray['isDeprecated'], $fieldArray['deprecationReason']);
+            } else {
+
+                // Generate nested type object if it wasn't generated
+                $objectGenerated = $this->generateObject($typeName, $typeKind, $this->modelKind);
+                if ($objectGenerated) {
+
+                    // Generate nested type arguments object if it wasn't generated
+                    $argsObjectName = $currentTypeName . StringLiteralFormatter::formatUpperCamelCase($name) . 'ArgumentsObject';
+                    $argsObjectGenerated = $this->generateArgumentsObject($argsObjectName, $fieldArray['args'] ?? []);
+                    if ($argsObjectGenerated) {
+
+                        // Add sub type as a field to the mutation object if all generation happened successfully
+                        $mutationObjectBuilder->addObjectField($name, $typeName, $argsObjectName, $fieldArray['isDeprecated'], $fieldArray['deprecationReason']);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * @param string $objectName
      * @param string $objectKind
      *
@@ -134,8 +200,8 @@ class SchemaClassGenerator
     protected function generateObject(string $objectName, string $objectKind): bool
     {
         switch ($objectKind) {
-            case FieldTypeKindEnum::OBJECT:
-                return $this->generateQueryObject($objectName);
+            case FieldTypeKindEnum::OBJECT:{}
+                return ($this->modelKind == 'mutation') ? $this->generateMutationObject($objectName) : $this->generateQueryObject($objectName);
             case FieldTypeKindEnum::INPUT_OBJECT:
                 return $this->generateInputObject($objectName);
             case FieldTypeKindEnum::ENUM_OBJECT:
@@ -173,6 +239,28 @@ class SchemaClassGenerator
      *
      * @return bool
      */
+    protected function generateMutationObject(string $objectName): bool
+    {
+        if (array_key_exists($objectName, $this->generatedObjects)) {
+            return true;
+        }
+
+        $this->generatedObjects[$objectName] = true;
+        $objectArray   = $this->schemaInspector->getObjectSchema($objectName);
+        $objectName    = $objectArray['name'];
+        $objectBuilder = new MutationObjectClassBuilder($this->writeDir, $objectName, $this->generationNamespace);
+
+        $this->appendMutationObjectFields($objectBuilder, $objectName, $objectArray['fields']);
+        $objectBuilder->build();
+
+        return true;
+    }
+
+    /**
+     * @param string $objectName
+     *
+     * @return bool
+     */
     protected function generateInputObject(string $objectName): bool
     {
         if (array_key_exists($objectName, $this->generatedObjects)) {
@@ -192,7 +280,7 @@ class SchemaClassGenerator
 
             $objectGenerated = true;
             if ($typeKind !== FieldTypeKindEnum::SCALAR) {
-                $objectGenerated = $this->generateObject($typeName, $typeKind);
+                $objectGenerated = $this->generateObject($typeName, $typeKind, $this->modelKind);
             }
 
             if ($objectGenerated) {
@@ -229,7 +317,7 @@ class SchemaClassGenerator
         $objectArray   = $this->schemaInspector->getEnumObjectSchema($objectName);
         $objectName    = $objectArray['name'];
         $objectBuilder = new EnumObjectBuilder($this->writeDir, $objectName, $this->generationNamespace);
-        
+
         foreach ($objectArray['enumValues'] as $enumValue) {
             $name        = $enumValue['name'];
             //$description = $enumValue['description'];
@@ -255,7 +343,7 @@ class SchemaClassGenerator
         $this->generatedObjects[$argsObjectName] = true;
 
         $objectBuilder = new ArgumentsObjectClassBuilder($this->writeDir, $argsObjectName, $this->generationNamespace);
-        
+
         foreach ($arguments as $argumentArray) {
             $name = $argumentArray['name'];
             //$description = $inputFieldArray['description'];
@@ -264,7 +352,7 @@ class SchemaClassGenerator
 
             $objectGenerated = true;
             if ($typeKind !== FieldTypeKindEnum::SCALAR) {
-                $objectGenerated = $this->generateObject($typeName, $typeKind);
+                $objectGenerated = $this->generateObject($typeName, $typeKind, $this->modelKind);
             }
 
             if ($objectGenerated) {
@@ -312,7 +400,7 @@ class SchemaClassGenerator
     /**
      * Sets the write directory if it's not set for the class
      */
-	private function setWriteDir(): void
+    private function setWriteDir(): void
     {
         if ($this->writeDir !== '') return;
 
