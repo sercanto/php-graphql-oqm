@@ -22,7 +22,6 @@ abstract class InputObject
 
         // TODO: Merge this code block with Query::constructArguments
         foreach ($this as $name => $value) {
-            if (empty($value) && !is_bool($value)) continue;
 
             // Append space at the beginning if it's not the first item on the list
             if ($first) {
